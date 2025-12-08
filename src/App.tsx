@@ -1,119 +1,182 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Download, Minus, Plus, Trash2, Move, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
+import React, { useState, useRef, useEffect } from "react";
+import {
+  Upload,
+  Download,
+  Minus,
+  Plus,
+  Trash2,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+} from "lucide-react";
+
+interface Point {
+  x: number;
+  y: number;
+}
+
+interface PathObject {
+  id: number;
+  path: Point[];
+}
+
+interface ImageObject {
+  id: number;
+  src: string;
+  img: HTMLImageElement;
+  x: number;
+  y: number;
+  scale: number;
+  paths: PathObject[];
+}
 
 export default function CutLineGenerator() {
-  const [images, setImages] = useState([]);
-  const [offset, setOffset] = useState(2);
-  const [lineColor, setLineColor] = useState('magenta');
-  const [smoothness, setSmoothness] = useState(2);
+  const [images, setImages] = useState<ImageObject[]>([]);
+  const [offset, setOffset] = useState<number>(2);
+  const [lineColor, setLineColor] = useState<"magenta" | "black">("magenta");
+  const [smoothness, setSmoothness] = useState<number>(2);
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
-  const [selectedImage, setSelectedImage] = useState(null);
+  const [selectedImage, setSelectedImage] = useState<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [showScaleModal, setShowScaleModal] = useState(false);
   const [tempScale, setTempScale] = useState(1);
-  const canvasRef = useRef(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const mmToPixel = 3.7795275591;
   const safeMargin = 2 * mmToPixel;
-  const handleImageUpload = (e) => {
-    const files = Array.from(e.target.files);
-    
-    files.forEach(file => {
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+
+    files.forEach((file) => {
       const reader = new FileReader();
       reader.onload = (event) => {
+        if (!event.target?.result) return;
         const img = new Image();
         img.onload = () => {
-          const newImage = {
+          const newImage: ImageObject = {
             id: Date.now() + Math.random(),
-            src: event.target.result,
+            src: event.target!.result as string,
             img: img,
             x: safeMargin,
             y: safeMargin,
             scale: 1,
-            paths: []
+            paths: [],
           };
-          
+
           processImagePaths(img, newImage.id);
-          setImages(prev => [...prev, newImage]);
+          setImages((prev) => [...prev, newImage]);
         };
-        img.src = event.target.result;
+        img.src = event.target!.result as string;
       };
       reader.readAsDataURL(file);
     });
   };
-  const findContours = (imageData, width, height) => {
+
+  const findContours = (
+    imageData: ImageData,
+    width: number,
+    height: number
+  ): Point[][] => {
     const data = imageData.data;
 
-    const getAlpha = (x, y) => {
+    const getAlpha = (x: number, y: number): number => {
       if (x < 0 || x >= width || y < 0 || y >= height) return 0;
       return data[(y * width + x) * 4 + 3];
     };
 
-    const isEdge = (x, y) => {
-      const alpha = getAlpha(x, y);
-      if (alpha < 128) return false;
-
-      return (
-        getAlpha(x - 1, y) < 128 ||
-        getAlpha(x + 1, y) < 128 ||
-        getAlpha(x, y - 1) < 128 ||
-        getAlpha(x, y + 1) < 128
-      );
-    };
-
-    const allOpaquePixels = [];
+    const edgePixels: Point[] = [];
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        if (getAlpha(x, y) >= 128) {
-          allOpaquePixels.push({ x, y });
+        const alpha = getAlpha(x, y);
+        if (alpha >= 128) {
+          const isEdge =
+            getAlpha(x - 1, y) < 128 ||
+            getAlpha(x + 1, y) < 128 ||
+            getAlpha(x, y - 1) < 128 ||
+            getAlpha(x, y + 1) < 128 ||
+            getAlpha(x - 1, y - 1) < 128 ||
+            getAlpha(x + 1, y - 1) < 128 ||
+            getAlpha(x - 1, y + 1) < 128 ||
+            getAlpha(x + 1, y + 1) < 128;
+
+          if (isEdge) {
+            edgePixels.push({ x, y });
+          }
         }
       }
     }
 
-    if (allOpaquePixels.length === 0) return [];
+    if (edgePixels.length === 0) return [];
 
-    const getConvexHull = (points) => {
-      if (points.length < 3) return points;
+    const orderedPath: Point[] = [];
+    const visited = new Set<string>();
 
-      const cross = (o, a, b) => {
-        return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-      };
+    let current = edgePixels[0];
+    orderedPath.push(current);
+    visited.add(`${current.x},${current.y}`);
 
-      points.sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+    while (orderedPath.length < edgePixels.length) {
+      let nearestDist = Infinity;
+      let nearest: Point | null = null;
 
-      const lower = [];
-      for (let i = 0; i < points.length; i++) {
-        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], points[i]) <= 0) {
-          lower.pop();
+      for (const pixel of edgePixels) {
+        const key = `${pixel.x},${pixel.y}`;
+        if (visited.has(key)) continue;
+
+        const dist = Math.sqrt(
+          Math.pow(pixel.x - current.x, 2) + Math.pow(pixel.y - current.y, 2)
+        );
+
+        if (dist < nearestDist && dist <= 2) {
+          nearestDist = dist;
+          nearest = pixel;
         }
-        lower.push(points[i]);
       }
 
-      const upper = [];
-      for (let i = points.length - 1; i >= 0; i--) {
-        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], points[i]) <= 0) {
-          upper.pop();
-        }
-        upper.push(points[i]);
-      }
+      if (!nearest) break;
 
-      upper.pop();
-      lower.pop();
-      return lower.concat(upper);
-    };
+      orderedPath.push(nearest);
+      visited.add(`${nearest.x},${nearest.y}`);
+      current = nearest;
+    }
 
-    const outerEdgePixels = allOpaquePixels.filter(p => isEdge(p.x, p.y));
-    const hull = getConvexHull(outerEdgePixels);
-
-    return [hull];
+    return orderedPath.length > 3 ? [orderedPath] : [];
   };
-  const simplifyContour = (points, tolerance) => {
+
+  const simplifyContour = (points: Point[], tolerance: number): Point[] => {
     if (points.length < 3) return points;
 
-    const douglasPeucker = (pts, epsilon) => {
+    const perpendicularDistance = (
+      point: Point,
+      lineStart: Point,
+      lineEnd: Point
+    ): number => {
+      const dx = lineEnd.x - lineStart.x;
+      const dy = lineEnd.y - lineStart.y;
+      const norm = Math.sqrt(dx * dx + dy * dy);
+
+      if (norm === 0) {
+        return Math.sqrt(
+          Math.pow(point.x - lineStart.x, 2) +
+            Math.pow(point.y - lineStart.y, 2)
+        );
+      }
+
+      return (
+        Math.abs(
+          dy * point.x -
+            dx * point.y +
+            lineEnd.x * lineStart.y -
+            lineEnd.y * lineStart.x
+        ) / norm
+      );
+    };
+
+    const douglasPeucker = (pts: Point[], epsilon: number): Point[] => {
       if (pts.length < 3) return pts;
-      
+
       let dmax = 0;
       let index = 0;
       const end = pts.length - 1;
@@ -135,51 +198,42 @@ export default function CutLineGenerator() {
       return [pts[0], pts[end]];
     };
 
-    const perpendicularDistance = (point, lineStart, lineEnd) => {
-      const dx = lineEnd.x - lineStart.x;
-      const dy = lineEnd.y - lineStart.y;
-      const norm = Math.sqrt(dx * dx + dy * dy);
-      
-      if (norm === 0) {
-        return Math.sqrt(
-          Math.pow(point.x - lineStart.x, 2) +
-          Math.pow(point.y - lineStart.y, 2)
-        );
-      }
-
-      return Math.abs(
-        dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x
-      ) / norm;
-    };
-
     return douglasPeucker(points, tolerance);
   };
 
-  const smoothContour = (points, iterations = 2) => {
-    let smoothed = [...points];
-    
-    for (let iter = 0; iter < iterations; iter++) {
-      const newPoints = [];
-      for (let i = 0; i < smoothed.length; i++) {
-        const prev = smoothed[(i - 1 + smoothed.length) % smoothed.length];
-        const curr = smoothed[i];
-        const next = smoothed[(i + 1) % smoothed.length];
-        
-        newPoints.push({
-          x: (prev.x + curr.x * 2 + next.x) / 4,
-          y: (prev.y + curr.y * 2 + next.y) / 4
-        });
-      }
-      smoothed = newPoints;
-    }
-    
-    return smoothed;
-  };
-  const applyOffset = (points, offsetValue) => {
+  const smoothContour = (points: Point[], iterations: number = 1): Point[] => {
     if (points.length < 3) return points;
 
-    const offsetPoints = [];
-    const mmToPixel = 3.7795275591;
+    let smoothed = [...points];
+
+    for (let iter = 0; iter < iterations; iter++) {
+      const newPoints: Point[] = [];
+
+      for (let i = 0; i < smoothed.length; i++) {
+        const curr = smoothed[i];
+        const next = smoothed[(i + 1) % smoothed.length];
+
+        newPoints.push({
+          x: curr.x * 0.75 + next.x * 0.25,
+          y: curr.y * 0.75 + next.y * 0.25,
+        });
+        newPoints.push({
+          x: curr.x * 0.25 + next.x * 0.75,
+          y: curr.y * 0.25 + next.y * 0.75,
+        });
+      }
+
+      smoothed = newPoints;
+    }
+
+    return smoothed;
+  };
+
+  const applyOffset = (points: Point[], offsetValue: number): Point[] => {
+    if (points.length < 3) return points;
+
+    const offsetPoints: Point[] = [];
+    const pixelOffset = offsetValue * mmToPixel;
 
     for (let i = 0; i < points.length; i++) {
       const prev = points[(i - 1 + points.length) % points.length];
@@ -203,10 +257,9 @@ export default function CutLineGenerator() {
       const nlen = Math.sqrt(nx * nx + ny * ny);
 
       if (nlen > 0) {
-        const pixelOffset = offsetValue * mmToPixel;
         offsetPoints.push({
-          x: curr.x - (nx / nlen) * pixelOffset,
-          y: curr.y - (ny / nlen) * pixelOffset
+          x: curr.x + (nx / nlen) * pixelOffset,
+          y: curr.y + (ny / nlen) * pixelOffset,
         });
       } else {
         offsetPoints.push({ x: curr.x, y: curr.y });
@@ -215,31 +268,39 @@ export default function CutLineGenerator() {
 
     return offsetPoints;
   };
-  const processImagePaths = (img, imageId) => {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+
+  const processImagePaths = (img: HTMLImageElement, imageId: number) => {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
     canvas.width = img.width;
     canvas.height = img.height;
-    
+
     ctx.drawImage(img, 0, 0);
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
     const contours = findContours(imageData, canvas.width, canvas.height);
-    
-    const processedPaths = contours.map((contour, idx) => {
+
+    const processedPaths: PathObject[] = contours.map((contour, idx) => {
       const simplified = simplifyContour(contour, smoothness);
-      const smoothed = smoothContour(simplified, 2);
+      const smoothed = smoothContour(
+        simplified,
+        Math.floor(smoothness / 2) + 1
+      );
       const withOffset = applyOffset(smoothed, offset);
       return { id: idx, path: withOffset };
     });
 
-    setImages(prev => prev.map(img => 
-      img.id === imageId ? { ...img, paths: processedPaths } : img
-    ));
+    setImages((prev) =>
+      prev.map((img) =>
+        img.id === imageId ? { ...img, paths: processedPaths } : img
+      )
+    );
   };
 
   useEffect(() => {
-    images.forEach(img => {
+    images.forEach((img) => {
       if (img.img) {
         processImagePaths(img.img, img.id);
       }
@@ -249,54 +310,60 @@ export default function CutLineGenerator() {
   useEffect(() => {
     drawCanvas();
   }, [images, zoom, lineColor]);
+
   const drawCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
-    const ctx = canvas.getContext('2d');
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    ctx.fillStyle = '#ffffff';
+
+    ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // 안전 영역 표시 (2mm 마진)
-    ctx.strokeStyle = '#ef4444';
+
+    ctx.strokeStyle = "#ef4444";
     ctx.lineWidth = 1;
     ctx.setLineDash([5, 5]);
-    ctx.strokeRect(safeMargin, safeMargin, canvas.width - safeMargin * 2, canvas.height - safeMargin * 2);
+    ctx.strokeRect(
+      safeMargin,
+      safeMargin,
+      canvas.width - safeMargin * 2,
+      canvas.height - safeMargin * 2
+    );
     ctx.setLineDash([]);
-    
-    const strokeColor = lineColor === 'magenta' ? '#FF00FF' : '#000000';
-    
-    images.forEach(image => {
+
+    const strokeColor = lineColor === "magenta" ? "#FF00FF" : "#000000";
+
+    images.forEach((image) => {
       ctx.save();
       ctx.translate(image.x, image.y);
       ctx.scale(image.scale * zoom, image.scale * zoom);
-      
+
       ctx.drawImage(image.img, 0, 0);
-      
-      image.paths.forEach(obj => {
+
+      image.paths.forEach((obj) => {
         const pathPoints = obj.path;
         if (pathPoints.length > 0) {
           ctx.beginPath();
           ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
-          
+
           for (let i = 1; i < pathPoints.length; i++) {
             ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
           }
           ctx.closePath();
-          
+
           ctx.strokeStyle = strokeColor;
           ctx.lineWidth = 2 / (image.scale * zoom);
           ctx.stroke();
         }
       });
-      
+
       ctx.restore();
-      
-      // 선택된 이미지 강조
+
       if (selectedImage === image.id) {
-        ctx.strokeStyle = '#3b82f6';
+        ctx.strokeStyle = "#3b82f6";
         ctx.lineWidth = 3;
         ctx.setLineDash([10, 5]);
         const imgW = image.img.width * image.scale * zoom;
@@ -306,28 +373,33 @@ export default function CutLineGenerator() {
       }
     });
   };
-  const handleCanvasMouseDown = (e) => {
-    const rect = canvasRef.current.getBoundingClientRect();
+
+  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    
-    const clickedImage = images.find(img => {
+
+    const clickedImage = images.find((img) => {
       const imgX = img.x;
       const imgY = img.y;
       const imgW = img.img.width * img.scale * zoom;
       const imgH = img.img.height * img.scale * zoom;
-      
+
       return x >= imgX && x <= imgX + imgW && y >= imgY && y <= imgY + imgH;
     });
-    
+
     if (clickedImage) {
       setSelectedImage(clickedImage.id);
-      
-      // 더블클릭 감지
+
       if (e.detail === 2) {
-        const img = images.find(i => i.id === clickedImage.id);
-        setTempScale(img.scale);
-        setShowScaleModal(true);
+        const img = images.find((i) => i.id === clickedImage.id);
+        if (img) {
+          setTempScale(img.scale);
+          setShowScaleModal(true);
+        }
       } else {
         setIsDragging(true);
         setDragStart({ x: x - clickedImage.x, y: y - clickedImage.y });
@@ -335,99 +407,141 @@ export default function CutLineGenerator() {
     }
   };
 
-  const handleCanvasMouseMove = (e) => {
+  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDragging || !selectedImage) return;
-    
-    const rect = canvasRef.current.getBoundingClientRect();
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    
-    setImages(prev => prev.map(img => {
-      if (img.id === selectedImage) {
-        let newX = x - dragStart.x;
-        let newY = y - dragStart.y;
-        
-        // 안전 영역 제한 적용
-        const imgW = img.img.width * img.scale * zoom;
-        const imgH = img.img.height * img.scale * zoom;
-        
-        newX = Math.max(safeMargin, Math.min(newX, canvasSize.width - safeMargin - imgW));
-        newY = Math.max(safeMargin, Math.min(newY, canvasSize.height - safeMargin - imgH));
-        
-        return { ...img, x: newX, y: newY };
-      }
-      return img;
-    }));
+
+    setImages((prev) =>
+      prev.map((img) => {
+        if (img.id === selectedImage) {
+          let newX = x - dragStart.x;
+          let newY = y - dragStart.y;
+
+          const imgW = img.img.width * img.scale * zoom;
+          const imgH = img.img.height * img.scale * zoom;
+
+          newX = Math.max(
+            safeMargin,
+            Math.min(newX, canvasSize.width - safeMargin - imgW)
+          );
+          newY = Math.max(
+            safeMargin,
+            Math.min(newY, canvasSize.height - safeMargin - imgH)
+          );
+
+          return { ...img, x: newX, y: newY };
+        }
+        return img;
+      })
+    );
   };
 
   const handleCanvasMouseUp = () => {
     setIsDragging(false);
   };
-  const deleteImage = (id) => {
-    setImages(prev => prev.filter(img => img.id !== id));
+
+  const deleteImage = (id: number) => {
+    setImages((prev) => prev.filter((img) => img.id !== id));
     if (selectedImage === id) setSelectedImage(null);
   };
 
   const applyScaleChange = () => {
-    setImages(prev => prev.map(img => 
-      img.id === selectedImage ? { ...img, scale: tempScale } : img
-    ));
+    setImages((prev) =>
+      prev.map((img) =>
+        img.id === selectedImage ? { ...img, scale: tempScale } : img
+      )
+    );
     setShowScaleModal(false);
   };
 
-  const downloadSVG = () => {
+  const downloadPDF = () => {
     if (!images.length) return;
-    const svg = createSVG();
-    const blob = new Blob([svg], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'cutline.svg';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
 
-  const createSVG = () => {
-    const strokeColor = lineColor === 'magenta' 
-      ? 'rgb(255, 0, 255)'
-      : 'rgb(0, 0, 0)';
-    
-    let imageElements = '';
-    let pathElements = '';
-    
-    images.forEach((image, imgIdx) => {
-      imageElements += `    <image href="${image.src}" x="${image.x}" y="${image.y}" width="${image.img.width * image.scale}" height="${image.img.height * image.scale}"/>\n`;
-      
-      image.paths.forEach((obj, pathIdx) => {
-        const pathPoints = obj.path;
-        if (pathPoints.length > 0) {
-          let pathData = `M ${(pathPoints[0].x * image.scale + image.x).toFixed(2)} ${(pathPoints[0].y * image.scale + image.y).toFixed(2)} `;
-          for (let i = 1; i < pathPoints.length; i++) {
-            pathData += `L ${(pathPoints[i].x * image.scale + image.x).toFixed(2)} ${(pathPoints[i].y * image.scale + image.y).toFixed(2)} `;
-          }
-          pathData += 'Z';
-          pathElements += `    <path class="cutline" id="cutline-${imgIdx}-${pathIdx}" d="${pathData}"/>\n`;
+    const script = document.createElement("script");
+    script.src =
+      "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+
+    script.onload = () => {
+      const w = window as any;
+      if (!w.jspdf) return;
+
+      const { jsPDF } = w.jspdf;
+
+      const pdf = new jsPDF({
+        orientation:
+          canvasSize.width > canvasSize.height ? "landscape" : "portrait",
+        unit: "px",
+        format: [canvasSize.width, canvasSize.height],
+        compress: false,
+      });
+
+      pdf.setProperties({
+        title: "Cut Line Document",
+        subject: "Vector Cut Lines",
+        creator: "Cut Line Generator",
+        keywords: "cutline, vector, print",
+      });
+
+      pdf.text("Layer: Images", 10, 10);
+      images.forEach((image) => {
+        try {
+          pdf.addImage(
+            image.src,
+            "PNG",
+            image.x,
+            image.y,
+            image.img.width * image.scale,
+            image.img.height * image.scale,
+            undefined,
+            "FAST"
+          );
+        } catch (error) {
+          console.error("이미지 추가 실패:", error);
         }
       });
-    });
-    
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<svg width="${canvasSize.width}" height="${canvasSize.height}" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <style>
-      .cutline { 
-        fill: none; 
-        stroke: ${strokeColor}; 
-        stroke-width: 1;
-      }
-    </style>
-  </defs>
-  <g id="image-layer">
-${imageElements}  </g>
-  <g id="cutlines-layer">
-${pathElements}  </g>
-</svg>`;
+
+      pdf.addPage([canvasSize.width, canvasSize.height]);
+      pdf.text("Layer: Cut Lines", 10, 10);
+
+      const strokeColor = lineColor === "magenta" ? [255, 0, 255] : [0, 0, 0];
+      pdf.setDrawColor(...strokeColor);
+      pdf.setLineWidth(1);
+
+      images.forEach((image) => {
+        image.paths.forEach((obj) => {
+          const pathPoints = obj.path;
+          if (pathPoints.length > 1) {
+            for (let i = 0; i < pathPoints.length; i++) {
+              const curr = pathPoints[i];
+              const next = pathPoints[(i + 1) % pathPoints.length];
+
+              const x1 = curr.x * image.scale + image.x;
+              const y1 = curr.y * image.scale + image.y;
+              const x2 = next.x * image.scale + image.x;
+              const y2 = next.y * image.scale + image.y;
+
+              pdf.line(x1, y1, x2, y2);
+            }
+          }
+        });
+      });
+
+      pdf.save("cutline.pdf");
+    };
+
+    script.onerror = () => {
+      alert("PDF 라이브러리 로드에 실패했습니다.");
+    };
+
+    document.head.appendChild(script);
   };
+
   return (
     <div className="min-h-screen bg-gray-50 p-8">
       <div className="max-w-7xl mx-auto">
@@ -436,7 +550,7 @@ ${pathElements}  </g>
             Cut Line Generator
           </h1>
           <p className="text-gray-600">
-            투명 배경 이미지에서 벡터 칼선 생성
+            투명 배경 이미지에서 벡터 칼선 생성 (PDF 출력)
           </p>
         </div>
 
@@ -462,6 +576,7 @@ ${pathElements}  </g>
                 </button>
               </div>
             </div>
+
             <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg">
               <p className="text-sm text-red-700">
                 ⚠️ 빨간 점선 안에 이미지를 배치하세요 (2mm 안전 영역)
@@ -470,6 +585,7 @@ ${pathElements}  </g>
                 더블클릭으로 이미지 크기 조절 가능
               </p>
             </div>
+
             <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
               <canvas
                 ref={canvasRef}
@@ -480,23 +596,31 @@ ${pathElements}  </g>
                 onMouseUp={handleCanvasMouseUp}
                 onMouseLeave={handleCanvasMouseUp}
                 className="cursor-move"
-                style={{ width: '100%', height: 'auto' }}
+                style={{ width: "100%", height: "auto" }}
               />
             </div>
+
             {images.length > 0 && (
               <div className="mt-4 space-y-2">
-                <h3 className="text-sm font-semibold text-gray-900">이미지 목록</h3>
+                <h3 className="text-sm font-semibold text-gray-900">
+                  이미지 목록
+                </h3>
                 {images.map((img, idx) => (
                   <div
                     key={img.id}
                     className={`flex items-center justify-between p-3 rounded border-2 ${
-                      selectedImage === img.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200'
+                      selectedImage === img.id
+                        ? "border-blue-500 bg-blue-50"
+                        : "border-gray-200"
                     }`}
                   >
                     <div className="flex-1">
-                      <span className="text-sm">이미지 {idx + 1} ({img.paths.length}개 패스)</span>
+                      <span className="text-sm">
+                        이미지 {idx + 1} ({img.paths.length}개 패스)
+                      </span>
                       <div className="text-xs text-gray-500 mt-1">
-                        크기: {Math.round(img.scale * 100)}% | 위치: ({Math.round(img.x)}, {Math.round(img.y)})
+                        크기: {Math.round(img.scale * 100)}% | 위치: (
+                        {Math.round(img.x)}, {Math.round(img.y)})
                       </div>
                     </div>
                     <div className="flex gap-2">
@@ -523,16 +647,21 @@ ${pathElements}  </g>
               </div>
             )}
           </div>
+
           <div className="w-80 space-y-6">
             <div className="bg-white rounded-lg shadow p-6">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">이미지 업로드</h3>
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">
+                이미지 업로드
+              </h3>
               <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-gray-400 hover:bg-gray-50 transition-colors">
                 <Upload className="w-10 h-10 text-gray-400 mb-2" />
                 <span className="text-sm text-gray-500">PNG 파일 선택</span>
-                <span className="text-xs text-gray-400 mt-1">다중 선택 가능</span>
-                <input 
-                  type="file" 
-                  className="hidden" 
+                <span className="text-xs text-gray-400 mt-1">
+                  다중 선택 가능
+                </span>
+                <input
+                  type="file"
+                  className="hidden"
                   accept="image/png"
                   multiple
                   onChange={handleImageUpload}
@@ -541,14 +670,21 @@ ${pathElements}  </g>
             </div>
 
             <div className="bg-white rounded-lg shadow p-6">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">대지 크기</h3>
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">
+                대지 크기
+              </h3>
               <div className="space-y-3">
                 <div>
                   <label className="text-xs text-gray-600">너비 (px)</label>
                   <input
                     type="number"
                     value={canvasSize.width}
-                    onChange={(e) => setCanvasSize(prev => ({ ...prev, width: parseInt(e.target.value) || 800 }))}
+                    onChange={(e) =>
+                      setCanvasSize((prev) => ({
+                        ...prev,
+                        width: parseInt(e.target.value) || 800,
+                      }))
+                    }
                     className="w-full mt-1 px-3 py-2 border border-gray-300 rounded"
                   />
                 </div>
@@ -557,15 +693,22 @@ ${pathElements}  </g>
                   <input
                     type="number"
                     value={canvasSize.height}
-                    onChange={(e) => setCanvasSize(prev => ({ ...prev, height: parseInt(e.target.value) || 600 }))}
+                    onChange={(e) =>
+                      setCanvasSize((prev) => ({
+                        ...prev,
+                        height: parseInt(e.target.value) || 600,
+                      }))
+                    }
                     className="w-full mt-1 px-3 py-2 border border-gray-300 rounded"
                   />
                 </div>
               </div>
             </div>
+
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-sm font-semibold text-gray-900 mb-3">
-                오프셋: {offset > 0 ? '+' : ''}{offset}mm
+                오프셋: {offset > 0 ? "+" : ""}
+                {offset}mm
               </h3>
               <div className="flex items-center gap-3 mb-2">
                 <button
@@ -590,9 +733,7 @@ ${pathElements}  </g>
                   <Plus className="w-4 h-4" />
                 </button>
               </div>
-              <p className="text-xs text-gray-500">
-                음수: 바깥쪽 / 양수: 안쪽
-              </p>
+              <p className="text-xs text-gray-500">음수: 바깥쪽 / 양수: 안쪽</p>
             </div>
 
             <div className="bg-white rounded-lg shadow p-6">
@@ -626,15 +767,18 @@ ${pathElements}  </g>
                 낮음: 정밀 / 높음: 부드러움
               </p>
             </div>
+
             <div className="bg-white rounded-lg shadow p-6">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">선 색상</h3>
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">
+                선 색상
+              </h3>
               <div className="space-y-2">
                 <button
-                  onClick={() => setLineColor('magenta')}
+                  onClick={() => setLineColor("magenta")}
                   className={`w-full p-3 rounded-lg border-2 transition-colors ${
-                    lineColor === 'magenta'
-                      ? 'border-pink-500 bg-pink-50'
-                      : 'border-gray-200 hover:border-gray-300'
+                    lineColor === "magenta"
+                      ? "border-pink-500 bg-pink-50"
+                      : "border-gray-200 hover:border-gray-300"
                   }`}
                 >
                   <div className="flex items-center gap-3">
@@ -646,11 +790,11 @@ ${pathElements}  </g>
                   </div>
                 </button>
                 <button
-                  onClick={() => setLineColor('black')}
+                  onClick={() => setLineColor("black")}
                   className={`w-full p-3 rounded-lg border-2 transition-colors ${
-                    lineColor === 'black'
-                      ? 'border-gray-700 bg-gray-50'
-                      : 'border-gray-200 hover:border-gray-300'
+                    lineColor === "black"
+                      ? "border-gray-700 bg-gray-50"
+                      : "border-gray-200 hover:border-gray-300"
                   }`}
                 >
                   <div className="flex items-center gap-3">
@@ -666,18 +810,21 @@ ${pathElements}  </g>
 
             <div className="bg-white rounded-lg shadow p-6">
               <button
-                onClick={downloadSVG}
+                onClick={downloadPDF}
                 disabled={!images.length}
                 className="w-full py-3 bg-gray-900 text-white rounded-lg font-medium hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
               >
                 <Download className="w-4 h-4" />
-                SVG 다운로드
+                PDF 다운로드
               </button>
+              <p className="text-xs text-gray-500 mt-2 text-center">
+                레이어 분리된 출판 품질 PDF
+              </p>
             </div>
           </div>
         </div>
       </div>
-      {/* 크기 조절 모달 */}
+
       {showScaleModal && selectedImage && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-96">
